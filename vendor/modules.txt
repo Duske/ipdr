@@ -47,6 +47,8 @@ github.com/ipfs/go-ipfs-api/options
 github.com/ipfs/go-ipfs-files
 # github.com/jbenet/go-base58 v0.0.0-20150317085156-6237cf65f3a6
 github.com/jbenet/go-base58
+# github.com/julienschmidt/httprouter v1.2.0
+github.com/julienschmidt/httprouter
 # github.com/konsorten/go-windows-terminal-sequences v1.0.1
 github.com/konsorten/go-windows-terminal-sequences
 # github.com/libp2p/go-flow-metrics v0.0.1
