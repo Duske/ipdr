@@ -112,7 +112,10 @@ func (s *Server) Start() error {
 			return
 		}
 
+		var digest = ""
+		contentType := "application/vnd.docker.distribution.manifest.v2+json"
 		var suffix string
+
 		if strings.HasSuffix(uri, "/latest") {
 			// docker daemon requesting the manifest
 			suffix = "-v1"
@@ -129,7 +132,6 @@ func (s *Server) Start() error {
 				}
 			}
 		}
-
 		parts := strings.Split(uri, "/")
 		if len(parts) <= 2 {
 			fmt.Fprintln(w, "out of range")
@@ -139,24 +141,25 @@ func (s *Server) Start() error {
 		hash := regutil.IpfsifyHash(parts[2])
 		rest := strings.Join(parts[3:], "/") // tag
 		path := hash + "/" + rest
-		var digest = ""
+
+		// manifests/sha256:xxxx, reuse digest and load default manifest
 		if parts[3] == "manifests" && strings.HasPrefix(parts[4], "sha256") {
 			digest = parts[4]
 			path = hash + "/manifests/latest-v2"
 		}
 		accepts := r.Header["Accept"]
-		contentType := "application/vnd.docker.distribution.manifest.v2+json"
+
+
+		// config file
 		if parts[3] == "blobs" && strings.Contains(accepts[0], "application/vnd.docker.container.image.v1+json") {
 			digest = parts[4]
 			path = hash + "/blobs/" + digest + "/" + strings.TrimPrefix(digest, "sha256:") + ".json"
 			contentType = "application/vnd.docker.container.image.v1+json"
 		}
-
-		bin := false
+		// blob binary file
 		if parts[3] == "blobs" && strings.Contains(accepts[0], "application/vnd.docker.image.rootfs.diff.tar.gzip") {
 			digest = parts[4]
 			contentType = "application/octet-stream"
-			bin = true
 		}
 		// blob request
 		location := s.ipfsURL(path)
@@ -167,29 +170,16 @@ func (s *Server) Start() error {
 		}
 		s.Debugf("[registry/server] location %s", location)
 
-		req, err := http.NewRequest("GET", location, nil)
+		body, err := requestFromGateway(location)
 		if err != nil {
 			fmt.Fprintf(w, err.Error())
 			return
 		}
 
-		httpClient := http.Client{}
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			fmt.Fprintf(w, err.Error())
-			return
-		}
-
-		body, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			fmt.Fprintf(w, err.Error())
-			return
-		}
-		aha := string(body)
+		// compute digest if not already set, e.g. when fetching the manifest/latest
 		if digest == "" {
-			var f = ""
-			f, err = Sha256Text(aha)
-			digest = "sha256:"+f
+			hash, err = Sha256Byte(body)
+			digest = "sha256:"+hash
 		}
 		if err != nil {
 			fmt.Fprintf(w, err.Error())
@@ -200,13 +190,8 @@ func (s *Server) Start() error {
 		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 		// if latest-v2 set header
 		w.Header().Set("Content-Type", contentType)
-
-		if bin {
-			w.Write(body)
-		} else {
-			w.Header().Set("Content-Length", strconv.Itoa(len(aha)))
-				fmt.Fprintf(w, aha)
-		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.Write(body)
 
 	})
 
@@ -255,4 +240,23 @@ func Sha256Byte(content []byte) (string, error) {
 	hash := sha256.Sum256(content)
 
 	return hex.EncodeToString(hash[:]), nil
+}
+
+func requestFromGateway(url string) ([]byte, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	httpClient := http.Client{}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return body, nil
 }
