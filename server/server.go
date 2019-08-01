@@ -1,16 +1,18 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/miguelmota/ipdr/ipfs"
+	"github.com/miguelmota/ipdr/regutil"
+	log "github.com/sirupsen/logrus"
 	"io/ioutil"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
-
-	ipfs "github.com/miguelmota/ipdr/ipfs"
-	regutil "github.com/miguelmota/ipdr/regutil"
-	log "github.com/sirupsen/logrus"
 )
 
 // Server is server structure
@@ -19,8 +21,8 @@ type Server struct {
 	listener    net.Listener
 	host        string
 	ipfsGateway string
-	tlsCrtPath 	string
-	tlsKeyPath	string
+	tlsCrtPath  string
+	tlsKeyPath  string
 }
 
 // Config is server config
@@ -28,8 +30,8 @@ type Config struct {
 	Debug       bool
 	Port        uint
 	IPFSGateway string
-	TLSCrtPath 	string
-	TLSKeyPath	string
+	TLSCrtPath  string
+	TLSKeyPath  string
 }
 
 // InfoResponse is response for manifest info response
@@ -137,7 +139,25 @@ func (s *Server) Start() error {
 		hash := regutil.IpfsifyHash(parts[2])
 		rest := strings.Join(parts[3:], "/") // tag
 		path := hash + "/" + rest
+		var digest = ""
+		if parts[3] == "manifests" && strings.HasPrefix(parts[4], "sha256") {
+			digest = parts[4]
+			path = hash + "/manifests/latest-v2"
+		}
+		accepts := r.Header["Accept"]
+		contentType := "application/vnd.docker.distribution.manifest.v2+json"
+		if parts[3] == "blobs" && strings.Contains(accepts[0], "application/vnd.docker.container.image.v1+json") {
+			digest = parts[4]
+			path = hash + "/blobs/" + digest + "/" + strings.TrimPrefix(digest, "sha256:") + ".json"
+			contentType = "application/vnd.docker.container.image.v1+json"
+		}
 
+		bin := false
+		if parts[3] == "blobs" && strings.Contains(accepts[0], "application/vnd.docker.image.rootfs.diff.tar.gzip") {
+			digest = parts[4]
+			contentType = "application/octet-stream"
+			bin = true
+		}
 		// blob request
 		location := s.ipfsURL(path)
 
@@ -165,13 +185,29 @@ func (s *Server) Start() error {
 			fmt.Fprintf(w, err.Error())
 			return
 		}
-
+		aha := string(body)
+		if digest == "" {
+			var f = ""
+			f, err = Sha256Text(aha)
+			digest = "sha256:"+f
+		}
+		if err != nil {
+			fmt.Fprintf(w, err.Error())
+			return
+		}
 		//w.Header().Set("Location", location) // not required since we're fetching the content and proxying
+		w.Header().Set("Docker-Content-Digest", digest)
 		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
-
 		// if latest-v2 set header
-		w.Header().Set("Content-Type", contentTypes["manifestV2Schema"])
-		fmt.Fprintf(w, string(body))
+		w.Header().Set("Content-Type", contentType)
+
+		if bin {
+			w.Write(body)
+		} else {
+			w.Header().Set("Content-Length", strconv.Itoa(len(aha)))
+				fmt.Fprintf(w, aha)
+		}
+
 	})
 
 	var err error
@@ -204,4 +240,19 @@ func (s *Server) Debugf(str string, args ...interface{}) {
 // ipfsURL returns the full IPFS url
 func (s *Server) ipfsURL(hash string) string {
 	return fmt.Sprintf("%s/ipfs/%s", s.ipfsGateway, hash)
+}
+
+// sha256 returns the sha256 hash of a string
+func Sha256Text(text string) (string, error) {
+	bv := []byte(text)
+	hash := sha256.Sum256(bv)
+
+	return hex.EncodeToString(hash[:]), nil
+}
+
+// sha256 returns the sha256 hash of a string
+func Sha256Byte(content []byte) (string, error) {
+	hash := sha256.Sum256(content)
+
+	return hex.EncodeToString(hash[:]), nil
 }
