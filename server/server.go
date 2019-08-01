@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/julienschmidt/httprouter"
 	"github.com/miguelmota/ipdr/ipfs"
 	"github.com/miguelmota/ipdr/regutil"
 	log "github.com/sirupsen/logrus"
@@ -48,6 +49,8 @@ var projectURL = "https://github.com/miguelmota/ipdr"
 var contentTypes = map[string]string{
 	"manifestV2Schema":     "application/vnd.docker.distribution.manifest.v2+json",
 	"manifestListV2Schema": "application/vnd.docker.distribution.manifest.list.v2+json",
+	"blobImageRootFSSchema": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+	"blobContainerConfigSchema": "application/vnd.docker.container.image.v1+json",
 }
 
 // NewServer returns a new server instance
@@ -77,123 +80,96 @@ func (s *Server) Start() error {
 		return nil
 	}
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		uri := r.RequestURI
-		s.Debugf("[registry/server] %s", uri)
-
-		if uri == "/health" {
-			fmt.Fprintln(w, "OK")
+	getManifest := func (w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+		ipfsHash := regutil.IpfsifyHash(ps.ByName("hash"))
+		manifestVersion := ps.ByName("version")
+		digest := ""
+		acceptHeader := r.Header.Get("Accept")
+		if !headerAccepts(acceptHeader, contentTypes["manifestV2Schema"]) && !headerAccepts(acceptHeader, contentTypes["manifestListV2Schema"]) {
+			w.WriteHeader(400)
+			fmt.Fprintf(w, "Only Registry schema v2 supported")
 			return
 		}
-
-		if uri == "/v2/" {
-			jsonstr, err := json.Marshal(&InfoResponse{
-				Info:    "An IPFS-backed Docker registry",
-				Project: projectURL,
-				Gateway: s.ipfsGateway,
-				Handles: []string{
-					contentTypes["manifestListV2Schema"],
-					contentTypes["manifestV2Schema"],
-				},
-				Problematic: []string{"version 1 registries"},
-			})
-			if err != nil {
-				fmt.Fprintln(w, err)
-				return
-			}
-
-			w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
-			fmt.Fprintln(w, string(jsonstr))
-			return
-		}
-
-		if len(uri) <= 1 {
-			fmt.Fprintln(w, "invalid multihash")
-			return
-		}
-
-		var digest = ""
-		contentType := "application/vnd.docker.distribution.manifest.v2+json"
-		var suffix string
-
-		if strings.HasSuffix(uri, "/latest") {
-			// docker daemon requesting the manifest
-			suffix = "-v1"
-			// If multiple mediaTypes in Accept-Header cannot be resolved to an array split it by ','
-			accepts := r.Header["Accept"]
-			if len(accepts) == 1 && strings.Contains(accepts[0], ",") {
-				accepts = strings.Split(accepts[0], ",")
-			}
-			for _, accept := range accepts {
-				if accept == contentTypes["manifestV2Schema"] ||
-					accept == contentTypes["manifestListV2Schema"] {
-					suffix = "-v2"
-					break
-				}
-			}
-		}
-		parts := strings.Split(uri, "/")
-		if len(parts) <= 2 {
-			fmt.Fprintln(w, "out of range")
-			return
-		}
-
-		hash := regutil.IpfsifyHash(parts[2])
-		rest := strings.Join(parts[3:], "/") // tag
-		path := hash + "/" + rest
-
-		// manifests/sha256:xxxx, reuse digest and load default manifest
-		if parts[3] == "manifests" && strings.HasPrefix(parts[4], "sha256") {
-			digest = parts[4]
-			path = hash + "/manifests/latest-v2"
-		}
-		accepts := r.Header["Accept"]
-
-
-		// config file
-		if parts[3] == "blobs" && strings.Contains(accepts[0], "application/vnd.docker.container.image.v1+json") {
-			digest = parts[4]
-			path = hash + "/blobs/" + digest + "/" + strings.TrimPrefix(digest, "sha256:") + ".json"
-			contentType = "application/vnd.docker.container.image.v1+json"
-		}
-		// blob binary file
-		if parts[3] == "blobs" && strings.Contains(accepts[0], "application/vnd.docker.image.rootfs.diff.tar.gzip") {
-			digest = parts[4]
-			contentType = "application/octet-stream"
-		}
-		// blob request
-		location := s.ipfsURL(path)
-
-		if suffix != "" {
-			// manifest request
-			location = location + suffix
-		}
-		s.Debugf("[registry/server] location %s", location)
-
+		location := s.ipfsURL(ipfsHash + "/manifests/latest-v2")
 		body, err := requestFromGateway(location)
 		if err != nil {
 			fmt.Fprintf(w, err.Error())
 			return
 		}
-
-		// compute digest if not already set, e.g. when fetching the manifest/latest
-		if digest == "" {
-			hash, err = Sha256Byte(body)
+		if strings.HasPrefix(manifestVersion, "/latest") {
+			hash, _ := Sha256Byte(body)
 			digest = "sha256:"+hash
+		} else {
+			digest = strings.TrimPrefix(manifestVersion,"/" )
 		}
+
+		w.Header().Set("Docker-Content-Digest", digest)
+		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+		w.Header().Set("Content-Type", contentTypes["manifestV2Schema"])
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.Write(body)
+	}
+
+	getBlob := func (w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+		ipfsHash := regutil.IpfsifyHash(ps.ByName("hash"))
+		sha256Hash := ps.ByName("sha256Hash")
+		acceptHeader := r.Header.Get("Accept")
+		contentType := ""
+		location := ""
+		// blob config file
+		if headerAccepts(acceptHeader, contentTypes["blobContainerConfigSchema"]) {
+			path :=  "/blobs/" + sha256Hash + "/" + strings.TrimPrefix(sha256Hash, "sha256:") + ".json"
+			location = s.ipfsURL(ipfsHash + path)
+			contentType = contentTypes["blobContainerConfigSchema"]
+		}
+		// blob binary file
+		if headerAccepts(acceptHeader, contentTypes["blobImageRootFSSchema"]) {
+			location = s.ipfsURL(ipfsHash + "/blobs/" + sha256Hash)
+			contentType = "application/octet-stream"
+		}
+		body, err := requestFromGateway(location)
 		if err != nil {
 			fmt.Fprintf(w, err.Error())
 			return
 		}
-		//w.Header().Set("Location", location) // not required since we're fetching the content and proxying
-		w.Header().Set("Docker-Content-Digest", digest)
+		w.Header().Set("Docker-Content-Digest", sha256Hash)
 		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
-		// if latest-v2 set header
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		w.Write(body)
+	}
 
-	})
+	getStatus := func (w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+		jsonstr, err := json.Marshal(&InfoResponse{
+			Info:    "An IPFS-backed Docker registry",
+			Project: projectURL,
+			Gateway: s.ipfsGateway,
+			Handles: []string{
+				contentTypes["manifestListV2Schema"],
+				contentTypes["manifestV2Schema"],
+			},
+			Problematic: []string{"version 1 registries"},
+		})
+		if err != nil {
+			fmt.Fprintln(w, err)
+			return
+		}
+
+		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+		fmt.Fprintln(w, string(jsonstr))
+		return
+	}
+
+	getHealth := func (w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+		fmt.Fprintln(w, "OK")
+		return
+	}
+
+	router := httprouter.New()
+	router.GET("/v2/", getStatus)
+	router.GET("/health", getHealth)
+	router.GET("/v2/:hash/manifests/*version", getManifest)
+	router.GET("/v2/:hash/blobs/:sha256Hash", getBlob)
 
 	var err error
 	s.listener, err = net.Listen("tcp", s.host)
@@ -203,9 +179,9 @@ func (s *Server) Start() error {
 
 	s.Debugf("[registry/server] listening on %s", s.listener.Addr())
 	if s.tlsKeyPath != "" && s.tlsCrtPath != "" {
-		return http.ServeTLS(s.listener, nil, s.tlsCrtPath, s.tlsKeyPath)
+		return http.ServeTLS(s.listener, router, s.tlsCrtPath, s.tlsKeyPath)
 	}
-	return http.Serve(s.listener, nil)
+	return http.Serve(s.listener, router)
 }
 
 // Stop stops the server
@@ -227,18 +203,23 @@ func (s *Server) ipfsURL(hash string) string {
 	return fmt.Sprintf("%s/ipfs/%s", s.ipfsGateway, hash)
 }
 
-// sha256 returns the sha256 hash of a string
-func Sha256Text(text string) (string, error) {
-	bv := []byte(text)
-	hash := sha256.Sum256(bv)
-
-	return hex.EncodeToString(hash[:]), nil
+func headerAccepts(acceptHeader string, mediaType string) bool {
+	var acceptedTypes []string
+	if strings.Contains(acceptHeader, ",") {
+		acceptedTypes = strings.Split(acceptHeader, ",")
+	} else {
+		return acceptHeader == mediaType
+	}
+	for _, accept := range acceptedTypes {
+		if accept == mediaType {
+			return true
+		}
+	}
+	return false
 }
 
-// sha256 returns the sha256 hash of a string
 func Sha256Byte(content []byte) (string, error) {
 	hash := sha256.Sum256(content)
-
 	return hex.EncodeToString(hash[:]), nil
 }
 

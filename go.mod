@@ -15,6 +15,7 @@ require (
 	github.com/inconshreveable/mousetrap v1.0.0 // indirect
 	github.com/ipfs/go-ipfs-api v0.0.1
 	github.com/jbenet/go-base58 v0.0.0-20150317085156-6237cf65f3a6
+	github.com/julienschmidt/httprouter v1.2.0
 	github.com/mattn/go-colorable v0.1.1 // indirect
 	github.com/mattn/go-isatty v0.0.6 // indirect
 	github.com/morikuni/aec v0.0.0-20170113033406-39771216ff4c // indirect
