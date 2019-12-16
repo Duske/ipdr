@@ -45,12 +45,17 @@ type InfoResponse struct {
 }
 
 var projectURL = "https://github.com/miguelmota/ipdr"
+var DEFAULT_MANIFEST_PATH = "/manifests/latest-v2"
 
 var contentTypes = map[string]string{
 	"manifestV2Schema":     "application/vnd.docker.distribution.manifest.v2+json",
 	"manifestListV2Schema": "application/vnd.docker.distribution.manifest.list.v2+json",
 	"blobImageRootFSSchema": "application/vnd.docker.image.rootfs.diff.tar.gzip",
 	"blobContainerConfigSchema": "application/vnd.docker.container.image.v1+json",
+	"OCI_manifestV2Schema":     "application/vnd.oci.image.index.v1+json",
+	"OCI_manifestListV2Schema": "application/vnd.oci.image.manifest.v1+json",
+	"OCI_blobImageRootFSSchema": "application/vnd.oci.image.layer.v1.tar+gzip",
+	"OCI_blobContainerConfigSchema": "application/vnd.oci.image.config.v1+json",
 }
 
 // NewServer returns a new server instance
@@ -83,29 +88,42 @@ func (s *Server) Start() error {
 	getManifest := func (w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
 		ipfsHash := regutil.IpfsifyHash(ps.ByName("hash"))
 		manifestVersion := ps.ByName("version")
-		digest := ""
 		acceptHeader := r.Header.Get("Accept")
-		if !headerAccepts(acceptHeader, contentTypes["manifestV2Schema"]) && !headerAccepts(acceptHeader, contentTypes["manifestListV2Schema"]) {
+		validAcceptHeader := false
+		var location = ""
+		if headerAccepts(acceptHeader, contentTypes["manifestV2Schema"]) || headerAccepts(acceptHeader, contentTypes["manifestListV2Schema"]) {
+			validAcceptHeader = true
+			// for docker, always resolve to latest-v2 manifest
+			location = s.ipfsURL(ipfsHash + DEFAULT_MANIFEST_PATH)
+		}
+
+		if headerAccepts(acceptHeader, contentTypes["OCI_manifestListV2Schema"]) || headerAccepts(acceptHeader, contentTypes["OCI_manifestV2Schema"]) {
+			validAcceptHeader = true
+			// default manifest
+			suffix := DEFAULT_MANIFEST_PATH
+			// specific manifest
+			if strings.HasPrefix(manifestVersion, "/sha256:"){
+				suffix = "/blobs" + manifestVersion
+			}
+			location = s.ipfsURL(ipfsHash + suffix)
+		}
+		if !validAcceptHeader {
 			w.WriteHeader(400)
 			fmt.Fprintf(w, "Only Registry schema v2 supported")
 			return
 		}
-		location := s.ipfsURL(ipfsHash + "/manifests/latest-v2")
+
 		body, err := requestFromGateway(location)
 		if err != nil {
 			fmt.Fprintf(w, err.Error())
 			return
 		}
-		if strings.HasPrefix(manifestVersion, "/latest") {
-			hash, _ := Sha256Byte(body)
-			digest = "sha256:"+hash
-		} else {
-			digest = strings.TrimPrefix(manifestVersion,"/" )
-		}
+		hash, _ := Sha256Byte(body)
+		digest := "sha256:"+hash
 
 		w.Header().Set("Docker-Content-Digest", digest)
 		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
-		w.Header().Set("Content-Type", contentTypes["manifestV2Schema"])
+		w.Header().Set("Content-Type", getContentTypeForManifest(body))
 		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		w.Write(body)
 	}
@@ -118,12 +136,21 @@ func (s *Server) Start() error {
 		location := ""
 		// blob config file
 		if headerAccepts(acceptHeader, contentTypes["blobContainerConfigSchema"]) {
+			// IPDR quirk: the config file lies in the blob directory as JSON-file in a directory named by the hash
+			// e.g. hash=123, location -> /blobs/sha256:123/123.json
 			path :=  "/blobs/" + sha256Hash + "/" + strings.TrimPrefix(sha256Hash, "sha256:") + ".json"
 			location = s.ipfsURL(ipfsHash + path)
 			contentType = contentTypes["blobContainerConfigSchema"]
 		}
+		// blob config file OCI
+		if headerAccepts(acceptHeader, contentTypes["OCI_blobContainerConfigSchema"]) {
+			path :=  "/blobs/" + sha256Hash
+			location = s.ipfsURL(ipfsHash + path)
+			contentType = contentTypes["blobContainerConfigSchema"]
+		}
+
 		// blob binary file
-		if headerAccepts(acceptHeader, contentTypes["blobImageRootFSSchema"]) {
+		if headerAccepts(acceptHeader, contentTypes["blobImageRootFSSchema"]) ||  headerAccepts(acceptHeader, contentTypes["OCI_blobImageRootFSSchema"]) {
 			location = s.ipfsURL(ipfsHash + "/blobs/" + sha256Hash)
 			contentType = "application/octet-stream"
 		}
@@ -211,11 +238,24 @@ func headerAccepts(acceptHeader string, mediaType string) bool {
 		return acceptHeader == mediaType
 	}
 	for _, accept := range acceptedTypes {
-		if accept == mediaType {
+		if strings.TrimSpace(accept) == mediaType {
 			return true
 		}
 	}
 	return false
+}
+
+func getContentTypeForManifest(manifest []byte) string {
+	jsonMap := make(map[string]interface{})
+	err := json.Unmarshal(manifest, &jsonMap)
+	if err != nil {
+		panic(err)
+	}
+	var contentType = jsonMap["mediaType"].(string)
+	if contentType != "" {
+		return contentType
+	}
+	return contentTypes["manifestV2Schema"]
 }
 
 func Sha256Byte(content []byte) (string, error) {
