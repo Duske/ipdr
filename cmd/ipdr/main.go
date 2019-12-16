@@ -18,6 +18,8 @@ var green = color.New(color.FgGreen)
 var (
 	// ErrImageIDRequired is error for when image ID is required
 	ErrImageIDRequired = errors.New("image hash or name is required")
+	// ErrOCIImagePathRequired is error for when image path is required
+	ErrOCIImagePathRequired = errors.New("path to oci image is required")
 	// ErrOnlyOneArgumentRequired is error for when one argument only is required
 	ErrOnlyOneArgumentRequired = errors.New("only one argument is required")
 	// ErrInvalidConvertFormat is error for when convert format is invalid
@@ -89,6 +91,44 @@ More info: https://github.com/miguelmota/ipdr`,
 	pushCmd.Flags().BoolVarP(&silent, "silent", "s", false, "Silent flag suppresses logs and outputs only IPFS hash")
 	pushCmd.Flags().StringVarP(&ipfsHost, "ipfs-host", "", "127.0.0.1:5001", "A remote IPFS API host to push the image to. Eg. 127.0.0.1:5001")
 	pushCmd.Flags().StringVarP(&dockerRegistryHost, "docker-registry-host", "", "docker.localhost:5000", "The Docker local registry host. Eg. 127.0.0.1:5000 Eg. docker.localhost:5000")
+
+	pushOciCmd := &cobra.Command{
+		Use:   "push-oci",
+		Short: "Push OCI image to IPFS-backed Docker registry",
+		Long:  "Push the OCI image to the InterPlanetary Docker Registry hosted on IPFS",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return ErrOCIImagePathRequired
+			}
+			if len(args) != 1 {
+				return ErrOnlyOneArgumentRequired
+			}
+
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			reg := registry.NewRegistry(&registry.Config{
+				IPFSHost:                ipfsHost,
+				IPFSGateway:             ipfsGateway,
+				Debug:                   !silent,
+			})
+
+			imagePath := args[0]
+
+			hash, err := reg.PushOciImageByPath(imagePath)
+			if err != nil {
+				return err
+			}
+
+			if silent {
+				fmt.Println(hash)
+			} else {
+				fmt.Println(green.Sprintf("\nSuccessfully pushed OCI image to IPFS:\n/ipfs/%s", hash))
+			}
+			return nil
+		},
+	}
+	pushOciCmd.Flags().StringVarP(&ipfsHost, "ipfs-host", "", "127.0.0.1:5001", "A remote IPFS API host to push the image to. Eg. 127.0.0.1:5001")
 
 	pullCmd := &cobra.Command{
 		Use:   "pull",
@@ -192,6 +232,7 @@ More info: https://github.com/miguelmota/ipdr`,
 	rootCmd.AddCommand(
 		pushCmd,
 		pullCmd,
+		pushOciCmd,
 		serverCmd,
 		convertCmd,
 	)
