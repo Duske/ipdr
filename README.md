@@ -291,3 +291,6 @@ For contributions please create a new branch and submit a pull request for revie
 ## License
 
 [MIT](LICENSE)
+
+## Docker buildx command
+`docker buildx build --platform linux/amd64,linux/arm64,linux/arm -t <repository/path>:<tag> --push .` 
